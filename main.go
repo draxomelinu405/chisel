@@ -1,98 +1,28 @@
-# Chisel
+package main
 
-[![GoDoc](https://godoc.org/github.com/jpillora/chisel?status.svg)](https://godoc.org/github.com/jpillora/chisel) [![CI](https://github.com/jpillora/chisel/workflows/CI/badge.svg)](https://github.com/jpillora/chisel/actions?workflow=CI)
+import (
+	"flag"
+	"fmt"
+	"log"
+	"net/http"
+	"os"
+	"runtime"
+	"strconv"
+	"strings"
+	"time"
 
-Chisel is a fast TCP/UDP tunnel, transported over HTTP, secured via SSH. Single executable including both client and server. Written in Go (golang). Chisel is mainly useful for passing through firewalls, though it can also be used to provide a secure endpoint into your network.
+	chclient "github.com/jpillora/chisel/client"
+	chserver "github.com/jpillora/chisel/server"
+	chshare "github.com/jpillora/chisel/share"
+	"github.com/jpillora/chisel/share/ccrypto"
+	"github.com/jpillora/chisel/share/cos"
+	"github.com/jpillora/chisel/share/settings"
+)
 
-![overview](https://docs.google.com/drawings/d/1p53VWxzGNfy8rjr-mW8pvisJmhkoLl82vAgctO_6f1w/pub?w=960&h=720)
-
-## Table of Contents
-
-- [Features](#features)
-- [Install](#install)
-- [Demo](#demo)
-- [Usage](#usage)
-- [Contributing](#contributing)
-- [Changelog](#changelog)
-- [License](#license)
-
-## Features
-
-- Easy to use
-- [Performant](./test/bench/perf.md)\*
-- [Encrypted connections](#security) using the SSH protocol (via `crypto/ssh`)
-- [Authenticated connections](#authentication); authenticated client connections with a users config file, authenticated server connections with fingerprint matching.
-- Client auto-reconnects with [exponential backoff](https://github.com/jpillora/backoff)
-- Clients can create multiple tunnel endpoints over one TCP connection
-- Clients can optionally pass through SOCKS or HTTP CONNECT proxies
-- Reverse port forwarding (Connections go through the server and out the client)
-- Server optionally doubles as a [reverse proxy](http://golang.org/pkg/net/http/httputil/#NewSingleHostReverseProxy)
-- Server optionally allows [SOCKS5](https://en.wikipedia.org/wiki/SOCKS) connections (See [guide below](#socks5-guide))
-- Clients optionally allow [SOCKS5](https://en.wikipedia.org/wiki/SOCKS) connections from a reversed port forward
-- Client connections over stdio which supports `ssh -o ProxyCommand` providing SSH over HTTP
-
-## Install
-
-### Binaries
-
-[![Releases](https://img.shields.io/github/release/jpillora/chisel.svg)](https://github.com/jpillora/chisel/releases) [![Releases](https://img.shields.io/github/downloads/jpillora/chisel/total.svg)](https://github.com/jpillora/chisel/releases)
-
-See [the latest release](https://github.com/jpillora/chisel/releases/latest) or download and install it now with `curl https://i.jpillora.com/chisel! | bash`
-
-### Docker
-
-[![Docker Pulls](https://img.shields.io/docker/pulls/jpillora/chisel.svg)](https://hub.docker.com/r/jpillora/chisel/) [![Image Size](https://img.shields.io/docker/image-size/jpillora/chisel/latest)](https://microbadger.com/images/jpillora/chisel)
-
-```sh
-docker run --rm -it jpillora/chisel --help
-```
-
-### Fedora
-
-The package is maintained by the Fedora community. If you encounter issues related to the usage of the RPM, please use this [issue tracker](https://bugzilla.redhat.com/buglist.cgi?bug_status=NEW&bug_status=ASSIGNED&classification=Fedora&component=chisel&list_id=11614537&product=Fedora&product=Fedora%20EPEL).
-
-```sh
-sudo dnf -y install chisel
-```
-
-### Source
-
-```sh
-$ go install github.com/jpillora/chisel@latest
-```
-
-## Demo
-
-A [demo app](https://chisel-demo.herokuapp.com) on Heroku is running this `chisel server`:
-
-```sh
-$ chisel server --port $PORT --proxy http://example.com
-# listens on $PORT, proxy web requests to http://example.com
-```
-
-This demo app is also running a [simple file server](https://www.npmjs.com/package/serve) on `:3000`, which is normally inaccessible due to Heroku's firewall. However, if we tunnel in with:
-
-```sh
-$ chisel client https://chisel-demo.herokuapp.com 3000
-# connects to chisel server at https://chisel-demo.herokuapp.com,
-# tunnels your localhost:3000 to the server's localhost:3000
-```
-
-and then visit [localhost:3000](http://localhost:3000/), we should see a directory listing. Also, if we visit the [demo app](https://chisel-demo.herokuapp.com) in the browser we should hit the server's default proxy and see a copy of [example.com](http://example.com).
-
-## Usage
-
-<!-- render these help texts by hand,
-  or use https://github.com/jpillora/md-tmpl
-    with $ md-tmpl -w README.md -->
-
-<!--tmpl,code=plain:echo "$ chisel --help" && go run main.go --help | sed 's#0.0.0-src (go1\..*)#X.Y.Z#' -->
-``` plain 
-$ chisel --help
-
+var help = `
   Usage: chisel [command] [--help]
 
-  Version: X.Y.Z
+  Version: ` + chshare.BuildVersion + ` (` + runtime.Version() + `)
 
   Commands:
     server - runs chisel in server mode
@@ -101,14 +31,69 @@ $ chisel --help
   Read more:
     https://github.com/jpillora/chisel
 
-```
-<!--/tmpl-->
+`
 
+func main() {
 
-<!--tmpl,code=plain:echo "$ chisel server --help" && go run main.go server --help | cat | sed 's#0.0.0-src (go1\..*)#X.Y.Z#' -->
-``` plain 
-$ chisel server --help
+	version := flag.Bool("version", false, "")
+	v := flag.Bool("v", false, "")
+	flag.Bool("help", false, "")
+	flag.Bool("h", false, "")
+	flag.Usage = func() {}
+	flag.Parse()
 
+	if *version || *v {
+		fmt.Println(chshare.BuildVersion)
+		os.Exit(0)
+	}
+
+	args := flag.Args()
+
+	subcmd := ""
+	if len(args) > 0 {
+		subcmd = args[0]
+		args = args[1:]
+	}
+
+	switch subcmd {
+	case "server":
+		server(args)
+	case "client":
+		client(args)
+	default:
+		fmt.Print(help)
+		os.Exit(0)
+	}
+}
+
+var commonHelp = `
+    --pid Generate pid file in current working directory
+
+    -v, Enable verbose logging
+
+    --help, This help text
+
+  Signals:
+    The chisel process is listening for:
+      a SIGUSR2 to print process stats, and
+      a SIGHUP to short-circuit the client reconnect timer
+
+  Version:
+    ` + chshare.BuildVersion + ` (` + runtime.Version() + `)
+
+  Read more:
+    https://github.com/jpillora/chisel
+
+`
+
+func generatePidFile() {
+	pid := []byte(strconv.Itoa(os.Getpid()))
+	if err := os.WriteFile("chisel.pid", pid, 0644); err != nil {
+		log.Fatal(err)
+	}
+}
+
+var serverHelp = `
   Usage: chisel server [options]
 
   Options:
@@ -189,32 +174,134 @@ $ chisel server --help
     holding multiple PEM encode CA certificate bundle files, which is used to 
     validate client connections. The provided CA certificates will be used 
     instead of the system roots. This is commonly used to implement mutual-TLS. 
+` + commonHelp
 
-    --pid Generate pid file in current working directory
+func server(args []string) {
 
-    -v, Enable verbose logging
+	flags := flag.NewFlagSet("server", flag.ContinueOnError)
 
-    --help, This help text
+	config := &chserver.Config{}
+	flags.StringVar(&config.KeySeed, "key", "", "")
+	flags.StringVar(&config.KeyFile, "keyfile", "", "")
+	flags.StringVar(&config.AuthFile, "authfile", "", "")
+	flags.StringVar(&config.Auth, "auth", "", "")
+	flags.DurationVar(&config.KeepAlive, "keepalive", 25*time.Second, "")
+	flags.StringVar(&config.Proxy, "proxy", "", "")
+	flags.StringVar(&config.Proxy, "backend", "", "")
+	flags.BoolVar(&config.Socks5, "socks5", false, "")
+	flags.BoolVar(&config.Reverse, "reverse", false, "")
+	flags.StringVar(&config.TLS.Key, "tls-key", "", "")
+	flags.StringVar(&config.TLS.Cert, "tls-cert", "", "")
+	flags.Var(multiFlag{&config.TLS.Domains}, "tls-domain", "")
+	flags.StringVar(&config.TLS.CA, "tls-ca", "", "")
 
-  Signals:
-    The chisel process is listening for:
-      a SIGUSR2 to print process stats, and
-      a SIGHUP to short-circuit the client reconnect timer
+	host := flags.String("host", "", "")
+	p := flags.String("p", "", "")
+	port := flags.String("port", "", "")
+	pid := flags.Bool("pid", false, "")
+	verbose := flags.Bool("v", false, "")
+	keyGen := flags.String("keygen", "", "")
 
-  Version:
-    X.Y.Z
+	flags.Usage = func() {
+		fmt.Print(serverHelp)
+		os.Exit(0)
+	}
+	flags.Parse(args)
 
-  Read more:
-    https://github.com/jpillora/chisel
+	if *keyGen != "" {
+		if err := ccrypto.GenerateKeyFile(*keyGen, config.KeySeed); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
 
-```
-<!--/tmpl-->
+	if config.KeySeed != "" {
+		log.Print("Option `--key` is deprecated and will be removed in a future version of chisel.")
+		log.Print("Please use `chisel server --keygen /file/path`, followed by `chisel server --keyfile /file/path` to specify the SSH private key")
+	}
 
+	if *host == "" {
+		*host = os.Getenv("HOST")
+	}
+	if *host == "" {
+		*host = "0.0.0.0"
+	}
+	if *port == "" {
+		*port = *p
+	}
+	if *port == "" {
+		*port = os.Getenv("PORT")
+	}
+	if *port == "" {
+		*port = "8080"
+	}
+	if config.KeyFile == "" {
+		config.KeyFile = settings.Env("KEY_FILE")
+	}
+	if config.KeySeed == "" {
+		config.KeySeed = settings.Env("KEY")
+	}
+	if config.Auth == "" {
+		config.Auth = os.Getenv("AUTH")
+	}
+	s, err := chserver.NewServer(config)
+	if err != nil {
+		log.Fatal(err)
+	}
+	s.Debug = *verbose
+	if *pid {
+		generatePidFile()
+	}
+	go cos.GoStats()
+	ctx := cos.InterruptContext()
+	if err := s.StartContext(ctx, *host, *port); err != nil {
+		log.Fatal(err)
+	}
+	if err := s.Wait(); err != nil {
+		log.Fatal(err)
+	}
+}
 
-<!--tmpl,code=plain:echo "$ chisel client --help" && go run main.go client --help | sed 's#0.0.0-src (go1\..*)#X.Y.Z#' -->
-``` plain 
-$ chisel client --help
+type multiFlag struct {
+	values *[]string
+}
 
+func (flag multiFlag) String() string {
+	return strings.Join(*flag.values, ", ")
+}
+
+func (flag multiFlag) Set(arg string) error {
+	*flag.values = append(*flag.values, arg)
+	return nil
+}
+
+type headerFlags struct {
+	http.Header
+}
+
+func (flag *headerFlags) String() string {
+	out := ""
+	for k, v := range flag.Header {
+		out += fmt.Sprintf("%s: %s\n", k, v)
+	}
+	return out
+}
+
+func (flag *headerFlags) Set(arg string) error {
+	index := strings.Index(arg, ":")
+	if index < 0 {
+		return fmt.Errorf(`Invalid header (%s). Should be in the format "HeaderName: HeaderContent"`, arg)
+	}
+	if flag.Header == nil {
+		flag.Header = http.Header{}
+	}
+	key := arg[0:index]
+	value := arg[index+1:]
+	flag.Header.Set(key, strings.TrimSpace(value))
+	return nil
+}
+
+var clientHelp = `
   Usage: chisel client [options] <server> <remote> [remote] [remote] ...
 
   <server> is the URL to the chisel server.
@@ -332,100 +419,67 @@ $ chisel client --help
     --tls-cert, a path to a PEM encoded certificate matching the provided 
     private key. The certificate must have client authentication 
     enabled (mutual-TLS).
+` + commonHelp
 
-    --pid Generate pid file in current working directory
+func client(args []string) {
+	flags := flag.NewFlagSet("client", flag.ContinueOnError)
+	config := chclient.Config{Headers: http.Header{}}
+	flags.StringVar(&config.Fingerprint, "fingerprint", "", "")
+	flags.StringVar(&config.Auth, "auth", "", "")
+	flags.DurationVar(&config.KeepAlive, "keepalive", 25*time.Second, "")
+	flags.IntVar(&config.MaxRetryCount, "max-retry-count", -1, "")
+	flags.DurationVar(&config.MaxRetryInterval, "max-retry-interval", 0, "")
+	flags.StringVar(&config.Proxy, "proxy", "", "")
+	flags.StringVar(&config.TLS.CA, "tls-ca", "", "")
+	flags.BoolVar(&config.TLS.SkipVerify, "tls-skip-verify", false, "")
+	flags.StringVar(&config.TLS.Cert, "tls-cert", "", "")
+	flags.StringVar(&config.TLS.Key, "tls-key", "", "")
+	flags.Var(&headerFlags{config.Headers}, "header", "")
+	hostname := flags.String("hostname", "", "")
+	sni := flags.String("sni", "", "")
+	pid := flags.Bool("pid", false, "")
+	verbose := flags.Bool("v", false, "")
+	flags.Usage = func() {
+		fmt.Print(clientHelp)
+		os.Exit(0)
+	}
+	flags.Parse(args)
+	//pull out options, put back remaining args
+	args = flags.Args()
+	if len(args) < 2 {
+		log.Fatalf("A server and least one remote is required")
+	}
+	config.Server = args[0]
+	config.Remotes = args[1:]
+	//default auth
+	if config.Auth == "" {
+		config.Auth = os.Getenv("AUTH")
+	}
+	//move hostname onto headers
+	if *hostname != "" {
+		config.Headers.Set("Host", *hostname)
+		config.TLS.ServerName = *hostname
+	}
 
-    -v, Enable verbose logging
+	if *sni != "" {
+		config.TLS.ServerName = *sni
+	}
 
-    --help, This help text
-
-  Signals:
-    The chisel process is listening for:
-      a SIGUSR2 to print process stats, and
-      a SIGHUP to short-circuit the client reconnect timer
-
-  Version:
-    X.Y.Z
-
-  Read more:
-    https://github.com/jpillora/chisel
-
-```
-<!--/tmpl-->
-
-### Security
-
-Encryption is always enabled. When you start up a chisel server, it will generate an in-memory ECDSA public/private key pair. The public key fingerprint (base64 encoded SHA256) will be displayed as the server starts. Instead of generating a random key, the server may optionally specify a key file, using the `--keyfile` option. When clients connect, they will also display the server's public key fingerprint. The client can force a particular fingerprint using the `--fingerprint` option. See the `--help` above for more information.
-
-### Authentication
-
-Using the `--authfile` option, the server may optionally provide a `user.json` configuration file to create a list of accepted users. The client then authenticates using the `--auth` option. See [users.json](example/users.json) for an example authentication configuration file. See the `--help` above for more information.
-
-Internally, this is done using the _Password_ authentication method provided by SSH. Learn more about `crypto/ssh` here http://blog.gopheracademy.com/go-and-ssh/.
-
-### SOCKS5 Guide with Docker
-
-1. Print a new private key to the terminal
-
-    ```sh
-    chisel server --keygen -
-    # or save it to disk --keygen /path/to/mykey
-    ```
-
-1. Start your chisel server
-
-    ```sh
-    jpillora/chisel server --keyfile '<ck-base64 string or file path>' -p 9312 --socks5
-    ```
-
-1. Connect your chisel client (using server's fingerprint)
-
-    ```sh
-    chisel client --fingerprint '<see server output>' <server-address>:9312 socks
-    ```
-
-1. Point your SOCKS5 clients (e.g. OS/Browser) to:
-
-    ```
-    <client-address>:1080
-    ```
-
-1. Now you have an encrypted, authenticated SOCKS5 connection over HTTP
-
-
-#### Caveats
-
-Since WebSockets support is required:
-
-- IaaS providers all will support WebSockets (unless an unsupporting HTTP proxy has been forced in front of you, in which case I'd argue that you've been downgraded to PaaS)
-- PaaS providers vary in their support for WebSockets
-  - Heroku has full support
-  - Openshift has full support though connections are only accepted on ports 8443 and 8080
-  - Google App Engine has **no** support (Track this on [their repo](https://code.google.com/p/googleappengine/issues/detail?id=2535))
-
-## Contributing
-
-- http://golang.org/doc/code.html
-- http://golang.org/doc/effective_go.html
-- `github.com/jpillora/chisel/share` contains the shared package
-- `github.com/jpillora/chisel/server` contains the server package
-- `github.com/jpillora/chisel/client` contains the client package
-
-## Changelog
-
-- `1.0` - Initial release
-- `1.1` - Replaced simple symmetric encryption for ECDSA SSH
-- `1.2` - Added SOCKS5 (server) and HTTP CONNECT (client) support
-- `1.3` - Added reverse tunnelling support
-- `1.4` - Added arbitrary HTTP header support
-- `1.5` - Added reverse SOCKS support (by @aus)
-- `1.6` - Added client stdio support (by @BoleynSu)
-- `1.7` - Added UDP support
-- `1.8` - Move to a `scratch`Docker image
-- `1.9` - Bump to Go 1.21. Switch from `--key` seed to P256 key strings with `--key{gen,file}` (by @cmenginnz)
-- `1.10` - Bump to Go 1.22. Add `.rpm` `.deb` and `.akp` to releases. Fix bad version comparison.
-- `1.11` - Bump to Go 1.25.1. Update all dependencies.
-
-## License
-
-[MIT](https://github.com/jpillora/chisel/blob/master/LICENSE) © Jaime Pillora
+	//ready
+	c, err := chclient.NewClient(&config)
+	if err != nil {
+		log.Fatal(err)
+	}
+	c.Debug = *verbose
+	if *pid {
+		generatePidFile()
+	}
+	go cos.GoStats()
+	ctx := cos.InterruptContext()
+	if err := c.Start(ctx); err != nil {
+		log.Fatal(err)
+	}
+	if err := c.Wait(); err != nil {
+		log.Fatal(err)
+	}
+}
